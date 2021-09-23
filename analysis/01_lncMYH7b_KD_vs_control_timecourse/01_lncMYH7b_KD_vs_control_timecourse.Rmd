@@ -1,0 +1,335 @@
+---
+title: "01_lncMYH7b_KD_vs_control_timecourse"
+author: "Michael Smallegan"
+date: "9/23/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(DESeq2)
+library(rtracklayer)
+library(janitor)
+library(ggrepel)
+library(pheatmap)
+source("../../util/_plot_theme.R")
+```
+
+```{r}
+# Let's get the genes associated with WNT signalling
+
+# WNT signalling pathway: GO:0016055 (455 genes)
+# positive regulation of Wnt signaling pathway by Wnt receptor internalization: GO:0038013
+# regulation of Wnt signaling pathway by Wnt protein secretion: GO:0061359
+# positive regulation of Wnt signaling pathway: GO:0030177
+# positive regulation of Wnt signaling pathway by BMP signaling pathway: GO:0060804
+# Wnt signaling pathway involved in heart development: GO:0003306
+# regulation of Wnt signaling pathway: GO:0030111
+# Wnt-activated receptor activity: GO:0042813
+# negative regulation of Wnt signaling pathway: GO:0030178
+# canonical Wnt signaling pathway: GO:0060070
+# negative regulation of Wnt signaling pathway by Wnt receptor internalization: GO:0038012
+library(biomaRt)
+ensembl = useMart("ensembl",dataset="hsapiens_gene_ensembl")
+gene.data <- getBM(attributes=c('hgnc_symbol', 'ensembl_gene_id', 'go_id'),
+                   filters = 'go', values = 'GO:0007507', mart = ensembl)
+
+```
+
+
+Purpose: look at which genes are changing differently in time in the lncMYH7b KD condition vs control in iPSC to cardiomyocyte differentiation.
+I think there are three questions we can answer at this point:
+1. During the course of differentiation
+There are actually two questions to ask here: 1. Which genes change early and can influence the lineage commitment pathway during differentiation?  2. Which genes are most robustly changing over time -- in other words, which are the most different over differentiation from the control cells?
+
+For question one, the way you were approaching it will work because we have enough replicates to compare directly KD to CTL at each timepoint. For question two, we can use a timecourse approach to look at which genes are responding most dramatically. We can then cluster these and see if there are some pathways enriched that can explain how these lncMYH7b KD cells differ from normal cardiomyocytes.
+
+```{r inport, include=FALSE}
+samples <- read_csv("../diff_samplesheet.csv") %>%
+  clean_names() %>%
+  # Make some factors out of the relevant variables.
+  mutate(condition = factor(condition, levels = c("CTL", "myh7b_KD")),
+         timepoint = factor(timepoint, levels = c("d2", "d4", "d6", "d10", "d12"))) %>% 
+  # Put the columns in order
+  arrange(condition, timepoint, bio_replicate) %>%
+  # Add a more meaningful name for plots
+  unite(sample_name, timepoint, condition, bio_replicate, remove = FALSE) %>%
+  mutate(sample_name = gsub("myh7b_", "", sample_name))
+
+# Grab the counts
+salmon_counts <- read_csv("../../results/salmon/salmon_merged_gene_counts.csv") %>%
+  column_to_rownames("gene_id") %>%
+  as.matrix()
+
+# Filter genes with less than 10 counts across the whole dataset
+salmon_counts <- salmon_counts[rowSums(salmon_counts) > 10,]
+
+# Get the annotations
+# gtf <- rtracklayer::import("../../util/gencode.v33.annotation.gtf")
+# genes <- gtf[gtf$type == "gene"]
+# rtracklayer::export(genes, "results/gencode_v33_genes.gtf")
+genes <- rtracklayer::import("results/gencode_v33_genes.gtf")
+g2s <- genes %>% 
+  as.data.frame() %>%
+  dplyr::select(gene_id, gene_name)
+write_csv(g2s, "results/gene2symbol.csv")
+
+# Line it all up
+names(genes) <- genes$gene_id
+genes <- genes[rownames(salmon_counts)]
+stopifnot(all(names(genes) == rownames(salmon_counts)))
+
+samples <- samples %>% as.data.frame()
+rownames(samples) <- samples$sample_id
+salmon_counts <- salmon_counts[,rownames(samples)]
+stopifnot(all(rownames(samples) == colnames(salmon_counts)))
+
+# Change count matrix to integer mode
+mode(salmon_counts) <- "integer"
+```
+
+This analysis will give us genes that are responding differently over time to the differentiation timecourse in the KD condition vs control. In this list of genes, those with small p-values are those which at one or more time points after time 2 days showed a KD-specific effect.
+
+```{r deg-timecourse}
+# Run DESeq2 to get genes DE in time in the KD compared to control
+dds <- DESeqDataSetFromMatrix(countData = salmon_counts,
+                              colData = samples,
+                              design = ~ timepoint + condition + timepoint*condition,
+                              rowData = genes)
+dds <- DESeq(dds, test = "LRT", reduced = ~ timepoint + condition)
+
+# Retrieve the LRT results.
+lrt_res <- results(dds, tidy = TRUE) %>%
+  dplyr::rename(gene_id = row) %>%
+  left_join(g2s) %>%
+  dplyr::select(gene_id, gene_name, everything())
+write_csv(lrt_res, "results/lrt_res.csv")
+
+# Let's make some cutoffs. These are flexible obviously.
+lrt_sig <- lrt_res %>% 
+  filter(padj < 0.01, abs(log2FoldChange) > 1)
+write_csv(lrt_sig, "results/lrt_res_sig.csv")
+```
+
+Let's make a quick heatmap. We can plot the genes that changed differently in time in the KD with padj < 0.01 and abs(log2FC) > 1. Which is 1614 genes. This isn't the best heatmap for visualizing what is happening because it is still pretty raw data, however, it does give a good overview of exactly how much data went into this and might be good for the supp. We'll use here the regularized log count from DESeq2, shown z-scaled across each gene.
+
+```{r deg-tc-genes, message=FALSE}
+# * again commented out for speed * #
+# rld <- rlog(dds, blind = FALSE)
+# write_rds(rld, "results/rld_counts.rds")
+rld <- read_rds("results/rld_counts.rds")
+rld_matrix <- assay(rld)
+sig_rld_matrix <- rld_matrix[lrt_sig$gene_id,]
+
+# Make sure it is in the proper order and replace the sample id with the sample name
+sig_rld_matrix <- sig_rld_matrix[,samples$sample_id]
+colnames(sig_rld_matrix) <- samples$sample_name
+
+ht1 <- pheatmap::pheatmap(sig_rld_matrix, 
+                          scale = "row", 
+                          show_rownames = FALSE, 
+                          cluster_cols = FALSE,
+                          color = col_pal, 
+                          main = "Differentially expressed genes in time in lncMY7b KD")
+ht1
+pdf("figures/deg_timecourse_padj0.01_heatmap.pdf"); ht1; dev.off()
+```
+
+Let's make a PCA plot with all the samples. This first one will contain replicates, but what we can do is take the mean normalized count across each timepoint and condition and plot that, so that we can show the trajectory through the space and show how they diverge.
+
+```{r}
+DESeq2::plotPCA(rld, intgroup = "condition")  +
+  scale_color_manual(values = c("#424242","#a8404c")) + 
+  ggtitle("Differentiation PCA")
+
+rld_matrix <- assay(rld)
+
+# PCA plot with the mean normalized count across each sample.
+# Let's grab just batch one for this though, since there was pretty high variance between batch one and two.
+
+gene_var <- rowVars(rld_matrix)
+
+summary(gene_var)
+rld_df <- rld_matrix[gene_var > 1,] %>% as.data.frame() %>% rownames_to_column("gene_id") %>%
+  pivot_longer(2:ncol(.), names_to = "sample_id", values_to = "rld") %>%
+  left_join(samples) %>%
+  unite(tcondition, condition, timepoint) %>%
+  group_by(gene_id, tcondition) %>%
+  summarize(mean_rld = mean(rld)) %>%
+  pivot_wider(names_from = tcondition, values_from = mean_rld) %>%
+  column_to_rownames("gene_id") %>%
+  as.matrix()
+
+pca <- prcomp(rld_df)
+pca_df <- pca$rotation %>% as.data.frame() %>%
+  rownames_to_column("tcondition") %>%
+  mutate(condition = ifelse(grepl("CTL", tcondition), "ctl", "kd"),
+         timepoint = gsub("CTL_|myh7b_KD_", "", tcondition))
+pca_df$timepoint <- factor(pca_df$timepoint, levels = c("d2", "d4", "d6", "d10", "d12"))
+pca_df$condition <- factor(pca_df$condition, levels = c("ctl", "kd"))
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = condition, label = timepoint)) +
+  geom_point() +
+  geom_text_repel() +
+  theme_paperwhite() +
+  scale_color_manual(values = c("#424242","#a8404c"))
+ggsave("figures/differentiation_pca_merged_replicates.pdf")
+ggsave("figures/differentiation_pca_merged_replicates.png")
+
+
+
+# PCA annotated with all the replicates unmerged
+rld_matrix <- assay(rld)
+d2_samples <- samples %>% filter(timepoint == "d6")
+d2_matrix <- rld_matrix[,d2_samples$sample_id]
+pca <- prcomp(d2_matrix)
+pca_df <- pca$rotation %>% as.data.frame() %>%
+  rownames_to_column("sample_id") %>%
+  left_join(samples)
+ggplot(pca_df, aes(x = PC1, y = PC2, color = condition, label = sample_id)) +
+  geom_point() +
+  geom_text_repel() +
+  theme_paperwhite() +
+  scale_color_manual(values = c("#424242","#a8404c"))
+```
+
+```{r}
+# clustering of samples variable genes
+rld_scaled <- t(scale(t(rld_df)))
+pheatmap(rld_scaled, show_rownames = FALSE, scale = "none", color = col_pal)
+```
+
+
+We only get one p-value for each gene, but we do get
+log2FoldChanges for each timepoint.
+One has to think a little bit about how to interpret these
+because they are the fold-change for KD vs CTL at each timepoint
+with the overall time trend and the differences at time zero (or day 2 in this case)
+subtracted out. Might not be the best for showing in publication plots, but I find it's
+a bit helpful.
+
+```{r extract-lfc-results}
+# ** This all takes a while to run, so I've commented it out for the purposes of knitting ** #
+
+# # Extract list of LFCs for each timepoint vs 2d and CTL.
+# # Let's also get the shrunken LFC here, since that is a nice way of visualizing those
+# # genes for which we have high confidence that they're changing.
+# res2compile <- resultsNames(dds)[grep("conditionmyh7b_KD", resultsNames(dds))]
+# res_list <- lapply(res2compile, function(x) results(dds, name = x))
+# shrnk_res_list <- lapply(res2compile, function(x) lfcShrink(dds = dds, coef = x, type="apeglm"))
+# # Then let's bind these all up in one dataframe to make life easier.
+# for(i in 1:length(res_list)) {
+#   tmp_df <- res_list[[i]] %>% 
+#     as.data.frame() %>%
+#     rownames_to_column("gene_id") %>%
+#     left_join(g2s) %>%
+#     mutate(lfc_type = "lfc",
+#            result_name = res2compile[[i]])
+#   tmp_shrnk_df <- shrnk_res_list[[i]] %>% 
+#     as.data.frame() %>%
+#     rownames_to_column("gene_id") %>%
+#     left_join(g2s) %>%
+#     mutate(lfc_type = "lfc_shrnk",
+#            result_name = res2compile[[i]])
+#   res_list[[i]] <- bind_rows(tmp_df, tmp_shrnk_df)
+# }
+# res_df <- bind_rows(res_list)
+# write_csv(res_df, "results/lrt_timepoint_lfc.csv")
+res_df <- read_csv("results/lrt_timepoint_lfc.csv")
+```
+
+Let's make some plots of this data.
+
+```{r}
+# Let's clean up the comparison column a bit to get the timepoints
+res_df <- res_df %>%
+  mutate(timepoint = gsub("timepoint|.conditionmyh7b_KD", "", result_name),
+         timepoint = factor(timepoint, levels = c("d4", "d6", "d10", "d12")))
+
+
+# First let's just look at how many genes hit a l2fc threshold in each 
+# timepoint
+shrnk_res_df <- res_df %>% filter(lfc_type == "lfc_shrnk")
+shrnk_res_sig <- shrnk_res_df %>% filter(padj < 0.01, abs(log2FoldChange) > 1) %>%
+  mutate(deg = ifelse(log2FoldChange > 0, "up", "down"))
+
+res_sig_summary <- shrnk_res_sig %>%
+  group_by(timepoint, deg) %>%
+  summarize(ngenes = n())
+ggplot(res_sig_summary, aes(x = deg, y = ngenes)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~timepoint) + 
+  geom_text(stat='identity', aes(label=ngenes), vjust=-1) +
+  theme_paperwhite() + 
+  ggtitle("Number of DEG KD vs CTL in time")
+```
+
+Great, let's make some plots of those genes that are changing at these early timepoints since it is few enough to visualize.
+
+```{r}
+tpm <- read_csv("../../results/salmon/salmon_merged_gene_tpm.csv")
+
+d4_sig <- shrnk_res_sig %>%
+  filter(timepoint == "d4")
+d6_sig <- shrnk_res_sig %>%
+  filter(timepoint == "d6")
+# Weirdly it is an entirely different set of genes.
+# There is a lot happening in these cells in these few days.
+table(d4_sig$gene_id %in% d6_sig$gene_id)
+
+d4_sig_tpm <- tpm %>% filter(gene_id %in% d4_sig$gene_id) %>%
+  pivot_longer(2:ncol(.), names_to = "sample_id", values_to = "tpm") %>%
+  left_join(samples) %>%
+  left_join(g2s)
+ggplot(d4_sig_tpm, aes(x = timepoint, y = tpm, color = condition, group = condition)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  stat_summary(fun = mean, fun.min = mean, fun.max = mean,
+               geom = "crossbar", width = 0.5) +
+  facet_wrap(~gene_name, scales = "free_y") +
+  theme_paperwhite() +
+  scale_color_manual(values = c("#424242","#a8404c"))
+
+```
+
+
+
+
+Can't help myself with a little bit of looking at what's going on here, but I'll leave that up to you. -MS
+
+```{r, include = FALSE}
+# Output for DAVID
+lrt_genes <- lrt_sig %>%
+  dplyr::select(gene_id) 
+lrt_genes$gene_id <- sapply(lrt_genes$gene_id, function(x) unlist(strsplit(x, ".", fixed = T))[[1]])
+write.table(lrt_genes, "results/lrt_sig_gene_ids.txt", quote = FALSE,
+            col.names = FALSE, row.names = FALSE)
+
+bg_genes <- rownames(salmon_counts)
+bg_genes <- sapply(bg_genes, function(x) unlist(strsplit(x, ".", fixed = T))[[1]])
+write.table(data.frame(gene_id = bg_genes), "results/background_gene_ids.txt",
+            quote = FALSE,
+            col.names = FALSE, row.names = FALSE)
+```
+
+
+
+```{r}
+
+?pheatmap
+rld_matrix[[1]]
+fiss <- plotCounts(dds, which.min(res$padj), 
+                   intgroup = c("timepoint","condition"), returnData = TRUE)
+fiss$timepoint
+ggplot(fiss,
+       aes(x = timepoint, y = count, color = condition, group = condition)) + 
+  geom_point() + stat_summary(fun.y=mean, geom="line") +
+  scale_y_log10()
+
+
+```
+
+
