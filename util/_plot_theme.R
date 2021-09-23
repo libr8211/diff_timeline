@@ -59,3 +59,7 @@ theme_paperwhite <- function(
       validate = TRUE
     )
 }
+
+col_pal <- c(colorRampPalette(colors = c("#424242", "#ffffff"))(49),
+             "#ffffff","#ffffff",
+             colorRampPalette(colors = c("#ffffff", "#a8404c"))(49))
