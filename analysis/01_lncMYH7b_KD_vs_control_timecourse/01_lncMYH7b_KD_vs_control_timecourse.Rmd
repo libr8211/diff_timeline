@@ -217,11 +217,19 @@ ctl_res_df <- lapply(res_to_complile, function(x) results(dds, name = x) %>%
                        rownames_to_column("gene_id") %>%
                        left_join(g2s) %>%
                        mutate(result_name = x,
-                              condition = "ctl")) %>%
+                              condition = "ctl",
+                              lfc_type = "lfc")) %>%
+  bind_rows()
+ctl_res_shrnk <- lapply(res_to_complile, function(x) lfcShrink(dds, coef = x, type = "ashr") %>%
+                       as.data.frame() %>%
+                       rownames_to_column("gene_id") %>%
+                       left_join(g2s) %>%
+                       mutate(result_name = x,
+                              condition = "ctl",
+                              lfc_type = "lfc_shrnk")) %>%
   bind_rows()
 
 # KD cells -- for completeness *not actually going to use this here*
-samples$condition
 kd_samples <- samples %>% filter(condition == "myh7b_KD")
 kd_counts <- salmon_counts[,kd_samples$sample_id]
 dds <- DESeqDataSetFromMatrix(countData = kd_counts,
@@ -237,8 +245,15 @@ kd_res_df <- lapply(res_to_complile, function(x) results(dds, name = x) %>%
                       mutate(result_name = x,
                              condition = "kd")) %>%
   bind_rows()
-
-vs_d2_res_df <- bind_rows(ctl_res_df, kd_res_df)
+kd_res_shrnk <- lapply(res_to_complile, function(x) lfcShrink(dds, coef = x, type = "ashr") %>%
+                       as.data.frame() %>%
+                       rownames_to_column("gene_id") %>%
+                       left_join(g2s) %>%
+                       mutate(result_name = x,
+                              condition = "ctl",
+                              lfc_type = "lfc_shrnk")) %>%
+  bind_rows()
+vs_d2_res_df <- bind_rows(ctl_res_df, ctl_res_shrnk, kd_res_df, kd_res_shrnk)
 
 # Tidy up the result name into a timepoint
 vs_d2_res_df <- vs_d2_res_df %>%
@@ -262,15 +277,76 @@ deseq_timepoint  <- function(tp, samples, counts) {
     as.data.frame() %>%
     rownames_to_column("gene_id") %>%
     left_join(g2s) %>%
-    mutate(timepoint = tp)
-  return(res)
+    mutate(timepoint = tp,
+           lfc_type = "lfc")
+  res_shrnk <- lfcShrink(dds, coef = "condition_myh7b_KD_vs_CTL", type = "ashr") %>%
+        as.data.frame() %>%
+    rownames_to_column("gene_id") %>%
+    left_join(g2s) %>%
+    mutate(timepoint = tp,
+           lfc_type = "lfc_shrnk") 
+  return(bind_rows(res, res_shrnk))
 }
 
 timepoints <- as.character(unique(samples$timepoint))
 tp_results <- lapply(timepoints, function(x) deseq_timepoint(x, samples, salmon_counts)) %>%
   bind_rows()
 write_csv(tp_results, "results/timepoint_kd_vs_ctl_deseq_results.csv")
+```
 
+```{r}
+# Let's make a plot of how many up and downregulated genes there are at each timepoint
+# for KD vs CTL
+tp_sig <- tp_results %>%
+  filter(lfc_type == "lfc",
+    padj < 0.01, 
+         abs(log2FoldChange) > 1) %>%
+  mutate(deg = ifelse(log2FoldChange > 0, "up", "down"))
+tp_sig_summary <- tp_sig %>%
+  group_by(timepoint, deg) %>%
+  summarize(ndeg = n())
+tp_sig_summary$timepoint <- factor(tp_sig_summary$timepoint, levels = c("d2", "d4", "d6", "d10", "d12"))
+
+
+tp_sig_summary$ndeg[tp_sig_summary$deg == "down"] <- tp_sig_summary$ndeg[tp_sig_summary$deg == "down"] * -1
+ndeg_barplot <- ggplot(tp_sig_summary, aes(x = timepoint, y = ndeg, fill = deg)) +
+  geom_hline(yintercept = 0) +
+  geom_bar(stat = "identity") +
+  theme_paperwhite() +
+  scale_fill_manual(values = c("#424242","#a8404c")) +
+  geom_text(data = tp_sig_summary %>% filter(deg == "up"),stat='identity', aes(label=ndeg), vjust=-1) +
+    geom_text(data = tp_sig_summary %>% filter(deg == "down"),stat='identity', aes(label=ndeg*-1), vjust=1.5) +
+  xlab("") +
+  ylab("Number of DEG")
+
+# Let's make a heatmap of these genes
+all_sig_tp_genes <- unique(tp_sig$gene_id)
+
+lfc_shrnk_tp_sig <- tp_results %>%
+  filter(lfc_type == "lfc_shrnk",
+         gene_id %in% all_sig_tp_genes) %>%
+  dplyr::select(gene_id, log2FoldChange, timepoint) %>%
+  pivot_wider(names_from = timepoint, values_from = log2FoldChange, values_fill = 0) %>%
+  column_to_rownames("gene_id") %>%
+  as.matrix()
+
+tp_lfc_heatmap <- pheatmap(lfc_shrnk_tp_sig, cluster_cols = FALSE, color = col_pal, show_rownames = FALSE,
+         breaks = seq(-5,5,length.out = 100), silent = TRUE)
+
+
+text <- ggparagraph(text = "The transcriptomes of lncMYH7b KD cells diverge from control cells late in the differentiation timecourse. A. PCA performed on normalized gene counts at each timepoint and condition for the subset of highly variable genes (>= 90th-percentile variance). B. Heatmap of normalized gene counts in timepoint and condition for the highly variable genes. At day 2, 4, and 6, lncMYH7b KD cells cluster with control cells. Toward the end of the differentiation (days 10 and 12) KD cells cluster irregularly. KD cells on day 10 form an outgroup of the CTLd10/12 cluster. KD cells on D12 form an outgroup of the CTLd6/10/12 cluster.", size = 11, color = "black", family = "sans")
+fig1 <- ggarrange(ggarrange(ndeg_barplot, tp_lfc_heatmap[[4]],
+                            labels = c("A", "B"),
+                            ncol = 2, nrow = 1, widths = c(0.5, 1)), text,
+                  ncol = 1, nrow = 2,
+                  heights = c(1, 0.3)) +
+  theme(plot.margin = margin(1,1,1,1, "cm")) 
+fig1
+```
+
+
+
+```{r}
 
 tp_results <- tp_results %>%
   mutate(timepoint = factor(timepoint, levels = c("d2", "d4", "d6", "d10", "d12")))
