@@ -1,6 +1,6 @@
 theme_paperwhite <- function(
   base_size = 14L,
-  base_family = "",
+  base_family = "sans",
   face = c("bold", "plain"),
   aspect_ratio = NULL,
   legend_position = c("right", "bottom", "top", "none"),
