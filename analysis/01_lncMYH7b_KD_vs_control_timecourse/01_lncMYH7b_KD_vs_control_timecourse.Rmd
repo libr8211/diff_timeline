@@ -17,6 +17,13 @@ library(janitor)
 library(ggrepel)
 library(pheatmap)
 library(ggpubr)
+library(scales)
+library(MASS)
+library(clusterProfiler)
+library(pathview)
+library("org.Hs.eg.db", character.only = TRUE)
+library(enrichplot)
+library(DOSE)
 source("../../util/_plot_theme.R")
 ```
 
@@ -45,7 +52,7 @@ salmon_counts <- salmon_counts[rowSums(salmon_counts) > 10,]
 # genes <- gtf[gtf$type == "gene"]
 # rtracklayer::export(genes, "results/gencode_v33_genes.gtf")
 genes <- rtracklayer::import("results/gencode_v33_genes.gtf")
-# g2s <- genes %>% 
+# g2s <- genes %>%
 #   as.data.frame() %>%
 #   dplyr::select(gene_id, gene_name)
 # write_csv(g2s, "results/gene2symbol.csv")
@@ -78,24 +85,21 @@ answer a few key questions:
 2.  At what stage of differentiation do lncMYH7b KD cells start to
     diverge from controls?
 
-3.  To what extent do the genes involved in lineage commitment diverge
+3.  To what extent do the genes involved in cardiomyogenesis diverge
     from controls?
 
-4.  Are lncMYH7b KD cells "stuck" in the middle of lineage commitment or
-    do they start to look like an entirely different cell type?
-
-5.  Are there steps early in the differentiation process that are
+4.  Are there steps early in the differentiation process that are
     misregulated by lncMYH7b depletion?
 
-6.  Since other results indicate that the WNT signalling pathway may be
+5.  Since other results indicate that the WNT signalling pathway may be
     implicated:
 
-7.  Is the WNT signalling pathway affected?
+    1.  Is the WNT signalling pathway affected?
 
-8.  Do gene expression changes give us an insight into how the pathway
-    is affected?
+    2.  Do gene expression changes give us an insight into how the
+        pathway is affected?
 
-9.  In the final stages of differentiation, are there genes or pathways
+6.  In the final stages of differentiation, are there genes or pathways
     that contribute to explaining the observed phenotype?
 
 ## Transcriptome concordance over differentiation
@@ -106,7 +110,7 @@ what extent the lncMYH7b cells are following the same differentiation
 pathway and how closely their transcriptomes end up resembling control
 cardiomyocytes.
 
-```{r transcriptome-concordance, echo = FALSE, message = FALSE, warning=FALSE, fig.height = 550px}
+```{r transcriptome-concordance, echo = FALSE, message = FALSE, warning=FALSE, fig.height=7, out.width='100%'}
 # Here we will use the regularized log normalized counts from DESeq2
 # For that we need to make a DESeqDataSet object.
 dds <- DESeqDataSetFromMatrix(countData = salmon_counts,
@@ -175,7 +179,7 @@ differentiation_heatmap <- pheatmap(rld_df,
                                     silent = TRUE)
 
 
-text <- ggparagraph(text = "The transcriptomes of lncMYH7b KD cells diverge from control cells late in the differentiation timecourse. A. PCA performed on normalized gene counts at each timepoint and condition for the subset of highly variable genes (>= 90th-percentile variance). B. Heatmap of normalized gene counts for each timepoint and condition for the highly variable genes. At day 2, 4, and 6, lncMYH7b KD cells cluster with control cells. Toward the end of the differentiation (days 10 and 12) KD cells cluster irregularly. KD cells on day 10 form an outgroup of the CTLd10/12 cluster. KD cells on D12 form an outgroup of the CTLd6/10/12 cluster.", size = 11, color = "black", family = "sans")
+text <- ggparagraph(text = "The transcriptomes of lncMYH7b KD cells diverge from control cells late in the differentiation timecourse. A. PCA performed on normalized gene counts at each timepoint and condition for the subset of highly variable genes (>= 90th-percentile variance). B. Heatmap of z-scaled normalized gene counts for each timepoint and condition for the highly variable genes. At day 2, 4, and 6, lncMYH7b KD cells cluster with control cells. Toward the end of the differentiation (days 10 and 12) KD cells cluster irregularly. KD cells on day 10 form an outgroup of the CTLd10/12 cluster. KD cells on D12 form an outgroup of the CTLd6/10/12 cluster.", size = 11, color = "black", family = "sans")
 fig1 <- ggarrange(ggarrange(differentiation_pca, differentiation_heatmap[[4]],
                             labels = c("A", "B"),
                             ncol = 2, nrow = 1), text,
@@ -204,98 +208,99 @@ timepoint (4 replicates), we can make this comparison with good depth.
 # We will run this seperately for the KD cells and the CTL cells.
 # And we have quite enough replicates to get good depth here. 
 
-# CTL cells
-ctl_samples <- samples %>% filter(condition == "CTL")
-ctl_counts <- salmon_counts[,ctl_samples$sample_id]
-dds <- DESeqDataSetFromMatrix(countData = ctl_counts,
-                              colData = ctl_samples,
-                              design = ~ timepoint,
-                              rowData = genes)
-dds <- DESeq(dds)
-res_to_complile <- resultsNames(dds)[grepl("timepoint", resultsNames(dds))]
-ctl_res_df <- lapply(res_to_complile, function(x) results(dds, name = x) %>%
-                       as.data.frame() %>%
-                       rownames_to_column("gene_id") %>%
-                       left_join(g2s) %>%
-                       mutate(result_name = x,
-                              condition = "ctl",
-                              lfc_type = "lfc")) %>%
-  bind_rows()
-ctl_res_shrnk <- lapply(res_to_complile, function(x) lfcShrink(dds, coef = x, type = "ashr") %>%
-                       as.data.frame() %>%
-                       rownames_to_column("gene_id") %>%
-                       left_join(g2s) %>%
-                       mutate(result_name = x,
-                              condition = "ctl",
-                              lfc_type = "lfc_shrnk")) %>%
-  bind_rows()
-
-# KD cells -- for completeness *not actually going to use this here*
-kd_samples <- samples %>% filter(condition == "myh7b_KD")
-kd_counts <- salmon_counts[,kd_samples$sample_id]
-dds <- DESeqDataSetFromMatrix(countData = kd_counts,
-                              colData = kd_samples,
-                              design = ~ timepoint,
-                              rowData = genes)
-dds <- DESeq(dds)
-res_to_complile <- resultsNames(dds)[grepl("timepoint", resultsNames(dds))]
-kd_res_df <- lapply(res_to_complile, function(x) results(dds, name = x) %>%
-                      as.data.frame() %>%
-                      rownames_to_column("gene_id") %>%
-                      left_join(g2s) %>%
-                      mutate(result_name = x,
-                             condition = "kd")) %>%
-  bind_rows()
-kd_res_shrnk <- lapply(res_to_complile, function(x) lfcShrink(dds, coef = x, type = "ashr") %>%
-                       as.data.frame() %>%
-                       rownames_to_column("gene_id") %>%
-                       left_join(g2s) %>%
-                       mutate(result_name = x,
-                              condition = "ctl",
-                              lfc_type = "lfc_shrnk")) %>%
-  bind_rows()
-vs_d2_res_df <- bind_rows(ctl_res_df, ctl_res_shrnk, kd_res_df, kd_res_shrnk)
-
-# Tidy up the result name into a timepoint
-vs_d2_res_df <- vs_d2_res_df %>%
-  mutate(comparison = gsub("timepoint_", "", result_name),
-         comparison = factor(comparison, levels = c("d4_vs_d2", "d6_vs_d2", "d10_vs_d2", "d12_vs_d2")))
-write_csv(vs_d2_res_df, "results/vs_d2_deseq_results.csv")
-
+# # CTL cells
+# ctl_samples <- samples %>% filter(condition == "CTL")
+# ctl_counts <- salmon_counts[,ctl_samples$sample_id]
+# dds <- DESeqDataSetFromMatrix(countData = ctl_counts,
+#                               colData = ctl_samples,
+#                               design = ~ timepoint,
+#                               rowData = genes)
+# dds <- DESeq(dds)
+# res_to_complile <- resultsNames(dds)[grepl("timepoint", resultsNames(dds))]
+# ctl_res_df <- lapply(res_to_complile, function(x) results(dds, name = x) %>%
+#                        as.data.frame() %>%
+#                        rownames_to_column("gene_id") %>%
+#                        left_join(g2s) %>%
+#                        mutate(result_name = x,
+#                               condition = "ctl",
+#                               lfc_type = "lfc")) %>%
+#   bind_rows()
+# ctl_res_shrnk <- lapply(res_to_complile, function(x) lfcShrink(dds, coef = x, type = "ashr") %>%
+#                        as.data.frame() %>%
+#                        rownames_to_column("gene_id") %>%
+#                        left_join(g2s) %>%
+#                        mutate(result_name = x,
+#                               condition = "ctl",
+#                               lfc_type = "lfc_shrnk")) %>%
+#   bind_rows()
+# 
+# # KD cells -- for completeness *not actually going to use this here*
+# kd_samples <- samples %>% filter(condition == "myh7b_KD")
+# kd_counts <- salmon_counts[,kd_samples$sample_id]
+# dds <- DESeqDataSetFromMatrix(countData = kd_counts,
+#                               colData = kd_samples,
+#                               design = ~ timepoint,
+#                               rowData = genes)
+# dds <- DESeq(dds)
+# res_to_complile <- resultsNames(dds)[grepl("timepoint", resultsNames(dds))]
+# kd_res_df <- lapply(res_to_complile, function(x) results(dds, name = x) %>%
+#                       as.data.frame() %>%
+#                       rownames_to_column("gene_id") %>%
+#                       left_join(g2s) %>%
+#                       mutate(result_name = x,
+#                              condition = "kd")) %>%
+#   bind_rows()
+# kd_res_shrnk <- lapply(res_to_complile, function(x) lfcShrink(dds, coef = x, type = "ashr") %>%
+#                        as.data.frame() %>%
+#                        rownames_to_column("gene_id") %>%
+#                        left_join(g2s) %>%
+#                        mutate(result_name = x,
+#                               condition = "ctl",
+#                               lfc_type = "lfc_shrnk")) %>%
+#   bind_rows()
+# vs_d2_res_df <- bind_rows(ctl_res_df, ctl_res_shrnk, kd_res_df, kd_res_shrnk)
+# 
+# # Tidy up the result name into a timepoint
+# vs_d2_res_df <- vs_d2_res_df %>%
+#   mutate(comparison = gsub("timepoint_", "", result_name),
+#          comparison = factor(comparison, levels = c("d4_vs_d2", "d6_vs_d2", "d10_vs_d2", "d12_vs_d2")))
+# write_csv(vs_d2_res_df, "results/vs_d2_deseq_results.csv")
+vs_d2_res_df <- read_csv("results/vs_d2_deseq_results.csv")
 
 # Okay, the second part of this that we need is the individual timepoint comparisons
 # between the KD cells and the CTLs
-deseq_timepoint  <- function(tp, samples, counts) {
-  
-  tp_samples <- samples %>% filter(timepoint == tp)
-  tp_counts <- counts[,tp_samples$sample_id]
-  dds <- DESeqDataSetFromMatrix(countData = tp_counts,
-                                colData = tp_samples,
-                                design = ~ condition,
-                                rowData = genes)
-  dds <- DESeq(dds)
-  res <- results(dds, name = "condition_myh7b_KD_vs_CTL") %>%
-    as.data.frame() %>%
-    rownames_to_column("gene_id") %>%
-    left_join(g2s) %>%
-    mutate(timepoint = tp,
-           lfc_type = "lfc")
-  res_shrnk <- lfcShrink(dds, coef = "condition_myh7b_KD_vs_CTL", type = "ashr") %>%
-        as.data.frame() %>%
-    rownames_to_column("gene_id") %>%
-    left_join(g2s) %>%
-    mutate(timepoint = tp,
-           lfc_type = "lfc_shrnk") 
-  return(bind_rows(res, res_shrnk))
-}
-
-timepoints <- as.character(unique(samples$timepoint))
-tp_results <- lapply(timepoints, function(x) deseq_timepoint(x, samples, salmon_counts)) %>%
-  bind_rows()
-write_csv(tp_results, "results/timepoint_kd_vs_ctl_deseq_results.csv")
+# deseq_timepoint  <- function(tp, samples, counts) {
+#   
+#   tp_samples <- samples %>% filter(timepoint == tp)
+#   tp_counts <- counts[,tp_samples$sample_id]
+#   dds <- DESeqDataSetFromMatrix(countData = tp_counts,
+#                                 colData = tp_samples,
+#                                 design = ~ condition,
+#                                 rowData = genes)
+#   dds <- DESeq(dds)
+#   res <- results(dds, name = "condition_myh7b_KD_vs_CTL") %>%
+#     as.data.frame() %>%
+#     rownames_to_column("gene_id") %>%
+#     left_join(g2s) %>%
+#     mutate(timepoint = tp,
+#            lfc_type = "lfc")
+#   res_shrnk <- lfcShrink(dds, coef = "condition_myh7b_KD_vs_CTL", type = "ashr") %>%
+#         as.data.frame() %>%
+#     rownames_to_column("gene_id") %>%
+#     left_join(g2s) %>%
+#     mutate(timepoint = tp,
+#            lfc_type = "lfc_shrnk") 
+#   return(bind_rows(res, res_shrnk))
+# }
+# 
+# timepoints <- as.character(unique(samples$timepoint))
+# tp_results <- lapply(timepoints, function(x) deseq_timepoint(x, samples, salmon_counts)) %>%
+#   bind_rows()
+# write_csv(tp_results, "results/timepoint_kd_vs_ctl_deseq_results.csv")
+tp_results <- read_csv("results/timepoint_kd_vs_ctl_deseq_results.csv")
 ```
 
-```{r num-deg, echo = FALSE, message = FALSE, warning=FALSE}
+```{r num-deg, echo = FALSE, message = FALSE, warning=FALSE, out.width='100%'}
 # Let's make a plot of how many up and downregulated genes there are at each timepoint
 # for KD vs CTL
 tp_sig <- tp_results %>%
@@ -317,8 +322,10 @@ ndeg_barplot <- ggplot(tp_sig_summary, aes(x = timepoint, y = ndeg, fill = deg))
   scale_fill_manual(values = c("#424242","#a8404c")) +
   geom_text(data = tp_sig_summary %>% filter(deg == "up"),stat='identity', aes(label=ndeg), vjust=-1) +
     geom_text(data = tp_sig_summary %>% filter(deg == "down"),stat='identity', aes(label=ndeg*-1), vjust=1.5) +
-  xlab("") +
-  ylab("Number of DEG")
+  ylab("Number of DEG") +
+  scale_y_continuous(expand = c(0.2, 0.2)) +
+  theme(legend.position = "bottom",
+        axis.title.x=element_blank())
 
 # Let's make a heatmap of these genes
 all_sig_tp_genes <- unique(tp_sig$gene_id)
@@ -332,44 +339,66 @@ lfc_shrnk_tp_sig <- tp_results %>%
   as.matrix()
 
 tp_lfc_heatmap <- pheatmap(lfc_shrnk_tp_sig, cluster_cols = FALSE, color = col_pal, show_rownames = FALSE,
-         breaks = seq(-5,5,length.out = 100), silent = TRUE)
+         breaks = seq(-5,5,length.out = 100), silent = TRUE, treeheight_row = 30)
 
-nrow(lfc_shrnk_tp_sig)
 
-text <- ggparagraph(text = "There are very few differentially expressed genes between KD cells and controls until day 10 of differentiation. A. Number of differentially expressed genes between lncMYH7b cells and controls within each timepoint (padj < 0.01; |log2FC| > 1). B. Heatmap of shrunken log2FoldChanges for all genes differentially expressed at any one timepoint(4,452 genes).", size = 11, color = "black", family = "sans")
+
+text <- ggparagraph(text = "There are very few differentially expressed genes between KD cells and controls until day 10 of differentiation. A. Number of differentially expressed genes between lncMYH7b cells and controls within each timepoint (padj < 0.01; |log2FC| > 1). B. Heatmap of shrunken log2FoldChanges for all genes differentially expressed at any one timepoint (4,452 genes).", size = 11, color = "black", family = "sans")
 fig1 <- ggarrange(ggarrange(ndeg_barplot, tp_lfc_heatmap[[4]],
                             labels = c("A", "B"),
-                            ncol = 2, nrow = 1, widths = c(0.7, 0.9)), text,
+                            ncol = 2, nrow = 1, widths = c(0.7, 1)), text,
                   ncol = 1, nrow = 2,
                   heights = c(1, 0.3)) +
   theme(plot.margin = margin(1,1,1,1, "cm")) 
 fig1
+ggsave("figures/deg_over_time.pdf")
 ```
 
 # How to the hallmark marker genes for cardiomyocyte differentiation compare in the KD cells and controls?
 
-Here we will just plot the 24 marker genes, and their relative
-expression compared to control
+Here we will just plot marker genes for cardiomyogensis over the
+timecourse, and their relative expression compared to control in TPM.
+Mostly this selection of genes is taken from [Mehta et al.
+2014](https://doi.org/10.1371/journal.pone.0103485)
 
-```{r marker-genes, echo = FALSE, message = FALSE, warning=FALSE}}
+```{r marker-genes, include=FALSE}
 marker_genes <- c("Pou5f1", "Nanog", "Sox2",
                   "Tbxt", "Mesp1", "Isl1",
                   "Kdr", "Mef2c",
                   "Gata4", "Nkx2-5", "Tbx3", "Tbx5",
                   "Tbx20", "Irx4",
                   "Nr2f2",
-                  "Tnnt2", 
+                  "Tnnt2",
                   "Myh7", 
                   "Myl2",
                   "Myl7",
                   "Myl3", "Myl4",
-                  "Shox", "Hcn3", "Hcn4",
+                  "Shox", "Hcn2", "Hcn4",
                   "Cacna1d", "Ryr2", "ATP2A2") %>%
   toupper()
-# TODO: double check that these are the right genes. Particularly Serca == ATP2A2
+# TODO: double check that these are the right genes. Particularly Serca2a == ATP2A2
 marker_g2s <- g2s %>% filter(gene_name %in% marker_genes) %>%
   # There are two matches for Shox -- also need to make sure this is the right one.
   filter(gene_id != "ENSG00000185960.14_PAR_Y")
+stopifnot(any(duplicated(marker_g2s$gene_name)) == FALSE)
+
+# Name these
+# Pluripotency markers - oct4, sox2, nanog
+#  cardiac mesodermal commitment  -- TBXT MESP1
+# cardiac transcriptional factors -- Isl1, Kdr, Mef2C, NKx2.5, Gata4, Tbx3/5/20 
+#  ventricular and atrial specific transcriptional factor -- Irx4 Nr2f2
+# Cardiac structural and sarcormeric proteins -- Tnnt2, Mlc2a/v, Myh7, Myl3/4
+# Markers of nodal pacemaker cells -- Hcn2 and Shox
+# Ion channel proteins -- ion channel proteins
+marker_g2s[marker_g2s$gene_name %in% c("POU5F1", "NANOG", "SOX2"), "marker_type"] <- "Pluripotency markers"
+marker_g2s[marker_g2s$gene_name %in% c("TBXT", "MESP1"), "marker_type"] <- "Mesodermal commitment"
+marker_g2s[marker_g2s$gene_name %in% c("ISL1", "KDR", "MEF2C", "GATA4", "NKX2-5", "TBX3", "TBX5", "TBX20"), "marker_type"] <- "Cardiac transcription factors"
+marker_g2s[marker_g2s$gene_name %in% c("IRX4", "NR2F2"), "marker_type"] <- "Ventricular/Atrial TFs"
+marker_g2s[marker_g2s$gene_name %in% c("TNNT2", "MYH7", "MYL2", "MYL7", "MYL3", "MYL4"), "marker_type"] <- "Card. structural and sarcomeric"
+marker_g2s[marker_g2s$gene_name %in% c("HCN2", "SHOX"), "marker_type"] <- "Nodal pacemaker markers"
+marker_g2s[marker_g2s$gene_name %in% c("HCN4","CACNA1D", "RYR2", "ATP2A2"), "marker_type"] <- "Ion channel proteins"
+
+
 
 # We can either plot the fold-changes or the tpm here. 
 # I suppose let's start with TPM.
@@ -391,6 +420,7 @@ salmon_tpm <- salmon_tpm %>% left_join(tp_sig %>% dplyr::select(gene_tp, deg))
 salmon_tpm$deg[!is.na(salmon_tpm$deg)] <- "sig"
 
 salmon_tpm_summary <- salmon_tpm %>% 
+  as.data.frame() %>%
   group_by(gene_name, condition, timepoint, deg) %>%
   summarize(mean_tpm = mean(tpm),
             sd_tpm = sd(tpm))
@@ -400,24 +430,485 @@ max_tpm_per_gene  <- salmon_tpm_summary %>%
 salmon_tpm_summary <- salmon_tpm_summary %>%
   left_join(max_tpm_per_gene)
 
-# Pluripotency markers - oct4, sox2, nanog
-#  cardiac mesodermal commitment  -- TBXT MESP1
-# cardiac transcriptional factors -- Isl1, Kdr, Mef2C, NKx2.5, Gata4, Tbx3/5/20 
-#  ventricular and atrial specific transcriptional factor -- Irf4 Nr2f2
-# Cardiac structural and sarcormeric proteins -- Tnni2, Mlc2a/v, Myh7, Myl3/4
+
 salmon_tpm_summary$gene_name <- factor(salmon_tpm_summary$gene_name, levels = marker_genes)
 salmon_tpm$gene_name <- factor(salmon_tpm$gene_name, levels = marker_genes)
-ggplot(salmon_tpm, aes(x = timepoint, y = tpm, color = condition, group = condition)) +
+
+salmon_tpm <- salmon_tpm %>% left_join(marker_g2s)
+salmon_tpm_summary <- salmon_tpm_summary %>% left_join(marker_g2s)
+
+salmon_tpm$marker_type <- factor(salmon_tpm$marker_type, levels = c("Pluripotency markers", "Mesodermal commitment", "Cardiac transcription factors", "Ventricular/Atrial TFs", "Card. structural and sarcomeric", "Nodal pacemaker markers", "Ion channel proteins"))
+salmon_tpm_summary$marker_type <- factor(salmon_tpm_summary$marker_type, levels = c("Pluripotency markers", "Mesodermal commitment", "Cardiac transcription factors", "Ventricular/Atrial TFs", "Card. structural and sarcomeric", "Nodal pacemaker markers", "Ion channel proteins"))
+# Wow this might be messy and a wormhole, but I still want to do it. 
+gp1 <- ggplot(salmon_tpm %>% filter(marker_type == "Pluripotency markers"), 
+              aes(x = timepoint, y = tpm, color = condition, group = condition)) +
   geom_hline(yintercept = 0) +
   geom_vline(xintercept = "d2") +
   # geom_errorbar(aes(ymin = mean_tpm - sd_tpm, ymax = mean_tpm + sd_tpm)) +
   geom_smooth(se = T, method = 'loess', formula = 'y ~ x', alpha = 0.1) + 
-  facet_wrap(~gene_name, ncol = 6, scales = "free_y") + 
+  facet_wrap(~gene_name, scales = "free", drop = TRUE) + 
   scale_color_manual(values = c("#424242","#a8404c")) +
   theme_paperwhite(grid = TRUE) +
   geom_text(data = salmon_tpm_summary %>% 
-              filter(deg == "sig"), aes(label = "*", y = max_tpm), stat = "identity",
+              filter(deg == "sig", condition == "CTL",marker_type == "Pluripotency markers" ), 
+            aes(label = "*", y = max_tpm), stat = "identity",
             size = 7, show.legend = FALSE) +
-  scale_y_continuous(expand = c(0.1, 2))
-# ATP2A2 should have *
+  scale_y_continuous(expand = c(0.1, 2)) +
+  ggtitle("Pluripotency markers") +
+   theme(plot.background = element_rect(fill = "white"),
+         panel.background = element_rect(fill = "white"),
+         legend.position = "none",
+         axis.title.x=element_blank())
+
+gp2 <- ggplot(salmon_tpm %>% filter(marker_type == "Mesodermal commitment"), 
+              aes(x = timepoint, y = tpm, color = condition, group = condition)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = "d2") +
+  # geom_errorbar(aes(ymin = mean_tpm - sd_tpm, ymax = mean_tpm + sd_tpm)) +
+  geom_smooth(se = T, method = 'loess', formula = 'y ~ x', alpha = 0.1) + 
+  facet_wrap(~gene_name, scales = "free", drop = TRUE) + 
+  scale_color_manual(values = c("#424242","#a8404c")) +
+  theme_paperwhite(grid = TRUE) +
+  geom_text(data = salmon_tpm_summary %>% 
+              filter(deg == "sig", condition == "CTL",marker_type == "Mesodermal commitment" ), aes(label = "*", y = max_tpm), stat = "identity",
+            size = 7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0.1, 2)) +
+  ggtitle("Mesodermal commitment") +
+     theme(plot.background = element_rect(fill = "white"),
+         panel.background = element_rect(fill = "white"),
+         legend.position = "none",
+         axis.title.x=element_blank())
+
+gp3 <- ggplot(salmon_tpm %>% filter(marker_type == "Cardiac transcription factors"), aes(x = timepoint, y = tpm, color = condition, group = condition)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = "d2") +
+  # geom_errorbar(aes(ymin = mean_tpm - sd_tpm, ymax = mean_tpm + sd_tpm)) +
+  geom_smooth(se = T, method = 'loess', formula = 'y ~ x', alpha = 0.1) + 
+  facet_wrap(~gene_name, scales = "free", drop = TRUE, ncol = 4) + 
+  scale_color_manual(values = c("#424242","#a8404c")) +
+  theme_paperwhite(grid = TRUE) +
+  geom_text(data = salmon_tpm_summary %>% 
+              filter(deg == "sig", condition == "CTL",marker_type == "Cardiac transcription factors" ), aes(label = "*", y = max_tpm), stat = "identity",
+            size = 7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0.1, 2)) +
+  ggtitle("Cardiac transcription factors") +
+   theme(plot.background = element_rect(fill = "white"),
+         panel.background = element_rect(fill = "white"),
+         legend.position = "none",
+         axis.title.x=element_blank())
+
+gp4 <- ggplot(salmon_tpm %>% filter(marker_type == "Ventricular/Atrial TFs"), aes(x = timepoint, y = tpm, color = condition, group = condition)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = "d2") +
+  # geom_errorbar(aes(ymin = mean_tpm - sd_tpm, ymax = mean_tpm + sd_tpm)) +
+  geom_smooth(se = T, method = 'loess', formula = 'y ~ x', alpha = 0.1) + 
+  facet_wrap(~gene_name, scales = "free", drop = TRUE, ncol = 6) + 
+  scale_color_manual(values = c("#424242","#a8404c")) +
+  theme_paperwhite(grid = TRUE) +
+  geom_text(data = salmon_tpm_summary %>% 
+              filter(deg == "sig", condition == "CTL",marker_type == "Ventricular/Atrial TFs" ), aes(label = "*", y = max_tpm), stat = "identity",
+            size = 7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0.1, 2)) +
+  ggtitle("Ventricular/Atrial TFs") +
+   theme(plot.background = element_rect(fill = "white"),
+         panel.background = element_rect(fill = "white"),
+         legend.position = "none",
+         axis.title.x=element_blank())
+
+gp5 <- ggplot(salmon_tpm %>% filter(marker_type == "Card. structural and sarcomeric"), aes(x = timepoint, y = tpm, color = condition, group = condition)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = "d2") +
+  # geom_errorbar(aes(ymin = mean_tpm - sd_tpm, ymax = mean_tpm + sd_tpm)) +
+  geom_smooth(se = T, method = 'loess', formula = 'y ~ x', alpha = 0.1) + 
+  facet_wrap(~gene_name, scales = "free", drop = TRUE, ncol = 6) + 
+  scale_color_manual(values = c("#424242","#a8404c")) +
+  theme_paperwhite(grid = TRUE) +
+  geom_text(data = salmon_tpm_summary %>% 
+              filter(deg == "sig", condition == "CTL",marker_type == "Card. structural and sarcomeric" ), aes(label = "*", y = max_tpm), stat = "identity",
+            size = 7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0.1, 2)) +
+  ggtitle("Card. structural and sarcomeric") +
+   theme(plot.background = element_rect(fill = "white"),
+         panel.background = element_rect(fill = "white"),
+         legend.position = "none",
+         axis.title.x=element_blank())
+
+gp6 <- ggplot(salmon_tpm %>% filter(marker_type == "Nodal pacemaker markers"), aes(x = timepoint, y = tpm, color = condition, group = condition)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = "d2") +
+  # geom_errorbar(aes(ymin = mean_tpm - sd_tpm, ymax = mean_tpm + sd_tpm)) +
+  geom_smooth(se = T, method = 'loess', formula = 'y ~ x', alpha = 0.1) + 
+  facet_wrap(~gene_name, scales = "free", drop = TRUE, ncol = 6) + 
+  scale_color_manual(values = c("#424242","#a8404c")) +
+  theme_paperwhite(grid = TRUE) +
+  geom_text(data = salmon_tpm_summary %>% 
+              filter(deg == "sig", condition == "CTL",marker_type == "Nodal pacemaker markers" ), aes(label = "*", y = max_tpm), stat = "identity",
+            size = 7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0.1, 2)) +
+  ggtitle("Nodal pacemaker markers") +
+   theme(plot.background = element_rect(fill = "white"),
+         panel.background = element_rect(fill = "white"),
+         legend.position = "none",
+         axis.title.x=element_blank())
+
+gp7 <- ggplot(salmon_tpm %>% filter(marker_type == "Ion channel proteins"), aes(x = timepoint, y = tpm, color = condition, group = condition)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = "d2") +
+  # geom_errorbar(aes(ymin = mean_tpm - sd_tpm, ymax = mean_tpm + sd_tpm)) +
+  geom_smooth(se = T, method = 'loess', formula = 'y ~ x', alpha = 0.1) + 
+  facet_wrap(~gene_name, scales = "free", drop = TRUE, ncol = 6) + 
+  scale_color_manual(values = c("#424242","#a8404c")) +
+  theme_paperwhite(grid = TRUE) +
+  geom_text(data = salmon_tpm_summary %>% 
+              filter(deg == "sig", condition == "CTL",marker_type == "Ion channel proteins" ), aes(label = "*", y = max_tpm), stat = "identity",
+            size = 7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0.1, 2)) +
+  ggtitle("Ion channel proteins") +
+   theme(plot.background = element_rect(fill = "white"),
+         panel.background = element_rect(fill = "white"),
+         legend.position = "none",
+         axis.title.x=element_blank())
+text <- ggparagraph(text = "\nCardiomyogensis marker genes in lncMYH7b KD cells (red) and control iPSCs (black). Plots show RNA-seq expression levels in TPM through days 2-12 of differentiation. Lines represent the loess fit for four replicates with with the standard error in gray and timepoints where expression differs significantly between control and KD are shown with an asterisk (padj < 0.01, |log2FC| > 1).", size = 11, color = "black", family = "sans")
+fig1 <- ggarrange(ggarrange(gp3, plot.new(),
+                            ncol = 2, nrow = 1, widths = c(0.8,0.4)),
+                  ggarrange(gp4, gp6, plot.new(),
+                            ncol = 3, nrow = 1, widths = c(0.4, 0.4, 0.4)),
+                  ggarrange(gp7, plot.new(),
+                            ncol = 2, nrow = 1, widths = c(0.8,0.4)),
+                  ggarrange(gp1, gp2, plot.new(),
+                            ncol = 3, nrow = 1, widths = c(0.6,0.4,0.2)),
+                  gp5,
+                  text,
+                  ncol = 1, nrow = 6,
+                  heights = c(0.8,0.4,0.4,0.4,0.4, 0.3)) +
+  theme(plot.margin = margin(1,1,1,1, "cm"))
+```
+
+```{r, echo = FALSE, message = FALSE, warning=FALSE, fig.height=12, fig.width=10, out.width='100%'}
+fig1
+ggsave("figures/cardiomyogensis_marker_genes.pdf", height = 12, width = 10)
+```
+
+# How might changes in early timepoints change the commitment pathways for lncMYH7b KD cells?
+
+Here we will just look at those genes that are changing in early
+timepoints and see if there is some pathway that may be influenced by
+the KD that would predict the larger scale changes seen later in the
+timecourse.
+
+```{r, include=FALSE}
+d2_tp_sig <- tp_sig %>% filter(timepoint == "d2")
+cat(paste0(d2_tp_sig$gene_name, "\n"))
+d4_tp_sig <- tp_sig %>% filter(timepoint == "d4")
+cat(paste0(d4_tp_sig$gene_name, "\n"))
+d6_tp_sig <- tp_sig %>% filter(timepoint == "d6")
+cat(paste0(d6_tp_sig$gene_name, "\n"))
+
+salmon_tpm_d2 <- read_csv("../../results/salmon/salmon_merged_gene_tpm.csv") %>%
+  pivot_longer(2:ncol(.), names_to = "sample_id", values_to = "tpm") %>%
+  left_join(g2s) %>% 
+  filter(gene_id %in% d2_tp_sig$gene_id) %>%
+  left_join(samples)
+salmon_tpm_d2$timepoint <- factor(salmon_tpm_d2$timepoint, levels = c("d2", "d4", 
+                                                                "d6", "d10",
+                                                                "d12"))
+
+salmon_tpm_d2 <- salmon_tpm_d2 %>% 
+  unite(gene_tp, gene_id, timepoint, remove = FALSE)
+tp_sig <- tp_sig %>% unite(gene_tp, gene_id, timepoint, remove = FALSE)
+
+salmon_tpm_d2 <- salmon_tpm_d2 %>% left_join(tp_sig %>% dplyr::select(gene_tp, deg))
+salmon_tpm_d2$deg[!is.na(salmon_tpm_d2$deg)] <- "sig"
+
+salmon_tpm_d2_summary <- salmon_tpm_d2 %>% 
+  as.data.frame() %>%
+  group_by(gene_name, condition, timepoint, deg) %>%
+  summarize(mean_tpm = mean(tpm),
+            sd_tpm = sd(tpm))
+max_tpm_per_gene  <- salmon_tpm_d2_summary %>%
+  group_by(gene_name) %>%
+  summarize(max_tpm = max(mean_tpm))
+salmon_tpm_d2_summary <- salmon_tpm_d2_summary %>%
+  left_join(max_tpm_per_gene)
+
+d2_tp_sig <-d2_tp_sig %>% arrange(-log2FoldChange)
+d2_tp_sig$gene_name
+salmon_tpm_d2$gene_name <- factor(salmon_tpm_d2$gene_name, levels = d2_tp_sig$gene_name)
+salmon_tpm_d2 <- salmon_tpm_d2 %>% arrange(gene_name)
+d2p <- ggplot(salmon_tpm_d2, aes(x = timepoint, y = tpm, color = condition, group = condition)) +
+  geom_hline(yintercept = 0) +
+  # geom_errorbar(aes(ymin = mean_tpm - sd_tpm, ymax = mean_tpm + sd_tpm)) +
+  geom_smooth(se = T, method = 'loess', formula = 'y ~ x', alpha = 0.1) + 
+  facet_wrap(~factor(gene_name, levels = d2_tp_sig$gene_name), scales = "free", drop = TRUE, ncol = 6) + 
+  scale_color_manual(values = c("#424242","#a8404c")) +
+  theme_paperwhite(grid = TRUE) +
+  geom_text(data = salmon_tpm_d2_summary %>%
+              filter(deg == "sig", condition == "CTL"), aes(label = "*", y = max_tpm), stat = "identity",
+            size = 7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0.1, 2)) +
+  # ggtitle("Ion channel proteins") +
+   theme(plot.background = element_rect(fill = "white"),
+         panel.background = element_rect(fill = "white"),
+         legend.position = "none",
+         axis.title.x=element_blank()) +
+  ggtitle("Day 2 differentially expressed genes")
+
+salmon_tpm_d4 <- read_csv("../../results/salmon/salmon_merged_gene_tpm.csv") %>%
+  pivot_longer(2:ncol(.), names_to = "sample_id", values_to = "tpm") %>%
+  left_join(g2s) %>% 
+  filter(gene_id %in% d4_tp_sig$gene_id) %>%
+  left_join(samples)
+salmon_tpm_d4$timepoint <- factor(salmon_tpm_d4$timepoint, levels = c("d2", "d4", 
+                                                                "d6", "d10",
+                                                                "d12"))
+salmon_tpm_d4 <- salmon_tpm_d4 %>% 
+  unite(gene_tp, gene_id, timepoint, remove = FALSE)
+tp_sig <- tp_sig %>% unite(gene_tp, gene_id, timepoint, remove = FALSE)
+
+salmon_tpm_d4 <- salmon_tpm_d4 %>% left_join(tp_sig %>% dplyr::select(gene_tp, deg))
+salmon_tpm_d4$deg[!is.na(salmon_tpm_d4$deg)] <- "sig"
+
+salmon_tpm_d4_summary <- salmon_tpm_d4 %>% 
+  as.data.frame() %>%
+  group_by(gene_name, condition, timepoint, deg) %>%
+  summarize(mean_tpm = mean(tpm),
+            sd_tpm = sd(tpm))
+max_tpm_per_gene  <- salmon_tpm_d4_summary %>%
+  group_by(gene_name) %>%
+  summarize(max_tpm = max(mean_tpm))
+salmon_tpm_d4_summary <- salmon_tpm_d4_summary %>%
+  left_join(max_tpm_per_gene)
+
+d4_tp_sig <-d4_tp_sig %>% arrange(-log2FoldChange)
+d4p <- ggplot(salmon_tpm_d4, aes(x = timepoint, y = tpm, color = condition, group = condition)) +
+  geom_hline(yintercept = 0) +
+  # geom_errorbar(aes(ymin = mean_tpm - sd_tpm, ymax = mean_tpm + sd_tpm)) +
+  geom_smooth(se = T, method = 'loess', formula = 'y ~ x', alpha = 0.1) + 
+  facet_wrap(~factor(gene_name, levels = d4_tp_sig$gene_name), scales = "free", drop = TRUE, ncol = 6) + 
+  scale_color_manual(values = c("#424242","#a8404c")) +
+  theme_paperwhite(grid = TRUE) +
+  geom_text(data = salmon_tpm_d4_summary %>%
+              filter(deg == "sig", condition == "CTL"), aes(label = "*", y = max_tpm), stat = "identity",
+            size = 7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0.1, 2)) +
+  # ggtitle("Ion channel proteins") +
+   theme(plot.background = element_rect(fill = "white"),
+         panel.background = element_rect(fill = "white"),
+         legend.position = "none",
+         axis.title.x=element_blank()) +
+  ggtitle("Day 4 differentially expressed genes")
+
+text <- ggparagraph(text = "\nDifferentially expressed genes at early timepoints in lncMYH7b KD cells (red) and control iPSCs (black). Plots show RNA-seq expression levels in TPM. Genes shown are those differentially expressed on days 2 and 4 of the timecourse. Lines represent the loess fit for four replicates with with the standard error in gray and timepoints where expression differs significantly between control and KD are shown with an asterisk (padj < 0.01, |log2FC| > 1).", size = 11, color = "black", family = "sans")
+fig1 <- ggarrange(d2p, d4p,
+                  text,
+                  ncol = 1, nrow = 3,
+                  heights = c(3,1,0.7)) +
+  theme(plot.margin = margin(1,1,1,1, "cm"))
+```
+
+```{r, echo = FALSE, message = FALSE, warning=FALSE, fig.height=12, fig.width=10, out.width='100%'}
+fig1
+ggsave("figures/deg_at_early_timepoints.pdf", height = 10, width = 10)
+```
+
+# Is the WNT signalling pathway affected over the course of differentiation by lncMYH7B KD?
+
+For this we will run GSEA on the ranked list of differentially expressed
+genes for each timepoint and look in particular at the gene sets
+involved in WNT signalling processes. There is one pathway in particular
+which will be of interest which is the canonical Wnt signaling pathway
+involved in cardiac muscle cell fate commitment. It seems that the KD is
+really affecting one gene in this pathway significantly -- DKK1,
+however, other genes in the pathway are changing enough that the pathway
+is significantly enriched at day 6, which is right before the KD cells
+start to really diverge from the controls.
+
+There's a lot more in these GSEA results to look through. In particular,
+there are a lot of significant pathways at day 10 that may help explain
+some of the defect in beating pattern in the KD cells, but I'll leave
+that up to you. The results are in csv format.
+
+Good luck
+
+-- Michael
+
+```{r, include=FALSE}
+# # Commented out just for knitting -- this takes a while.
+# 
+# calc_gse <- function(de_dataset, tp) {
+#   tp_res <- de_dataset %>% 
+#     filter(lfc_type == "lfc", timepoint == tp) %>%
+#   arrange(-log2FoldChange)
+#   tp_lfc <- tp_res$log2FoldChange
+#   names(tp_lfc) <- tp_res$gene_id
+#   names(tp_lfc) <- sapply(names(tp_lfc), function(x) unlist(strsplit(x, ".", fixed = T))[[1]])
+#   tp_lfc <- na.omit(tp_lfc)
+#   gse <- gseGO(geneList=tp_lfc, 
+#              ont ="ALL", 
+#              keyType = "ENSEMBL", 
+#              nPerm = 10000, 
+#              minGSSize = 3, 
+#              maxGSSize = 800, 
+#              pvalueCutoff = 1, 
+#              verbose = TRUE, 
+#              OrgDb = "org.Hs.eg.db", 
+#              pAdjustMethod = "none")
+#   write_rds(gse, paste0("results/gse_",tp, ".rds"))
+#   # Extract data.frame
+#   gse_df <- gse@result %>%
+#     mutate(timepoint = tp)
+#   return(gse_df)
+# }
+# 
+# 
+# gse_res_timepoints <- lapply(c("d2", "d4", "d6", "d10", "d12"),
+#                              function(x) calc_gse(tp_results, x))
+# gse_res_df <- bind_rows(gse_res_timepoints)
+# write_csv(gse_res_df, "results/gse_timepoints_results.csv")
+gse_res_df <- read_csv("results/gse_timepoints_results.csv")
+gse_res_df$timepoint <- factor(gse_res_df$timepoint, levels = c("d2", "d4", "d6", "d10", "d12"))
+# wnt signalling involved in heart development
+wnt_pathways <- gse_res_df %>% filter(grepl("wnt", Description,ignore.case = T))
+sig_wnt_pathways <- wnt_pathways %>% filter(p.adjust < 0.05)
+
+wnt_pathways_matrix_sig <- wnt_pathways %>%
+  mutate(sig = ifelse(p.adjust < 0.05, "*", "")) %>%
+  dplyr::select(Description, sig, timepoint) %>%
+  pivot_wider(names_from = timepoint, values_from = sig, values_fill = "") %>%
+  column_to_rownames("Description") %>%
+  as.matrix()
+
+wnt_pathway_matrix <- wnt_pathways %>%
+  dplyr::select(Description, NES, timepoint) %>%
+  pivot_wider(names_from = timepoint, values_from = NES) %>%
+  column_to_rownames("Description") %>%
+  as.matrix()
+
+wnt_gse_heatmap <- pheatmap(wnt_pathway_matrix, cluster_cols = FALSE, cutree_rows = 10, color = col_pal,
+         display_numbers = wnt_pathways_matrix_sig,
+         number_color = "white",
+         fontsize_number = 14, 
+         silent = TRUE)
+# I would say the genes associated with this pathway sound particularly interesting. 
+# Let's grab them and make a few plots.
+# canonical Wnt signaling pathway involved in cardiac muscle cell fate commitment
+wnt_reg_heart_induction <- wnt_pathways %>% filter(ID == "GO:0061317")
+wnt_reg_card_muscle_genes <- wnt_reg_heart_induction %>%
+  separate_rows(core_enrichment, sep = "/") %>%
+  pull(core_enrichment) %>%
+  unique()
+
+card_mus_genes_full <- g2s$gene_id[sapply(wnt_reg_card_muscle_genes, function(x) grep(x, g2s$gene_id))]
+
+card_mus_res <- tp_results %>% filter(gene_id %in% card_mus_genes_full)
+
+
+card_mus_matrix <- card_mus_res %>% filter(lfc_type == "lfc") %>% dplyr::select(gene_name, log2FoldChange, timepoint) %>%
+  pivot_wider(names_from = timepoint, values_from = log2FoldChange) %>%
+  column_to_rownames("gene_name") %>%
+  as.matrix()
+cmwnt_lfc_heatmap <- pheatmap(card_mus_matrix, cluster_cols = FALSE, color = col_pal, silent = TRUE)
+
+
+salmon_tpm_cmwnt <- read_csv("../../results/salmon/salmon_merged_gene_tpm.csv") %>%
+  pivot_longer(2:ncol(.), names_to = "sample_id", values_to = "tpm") %>%
+  left_join(g2s) %>% 
+  filter(gene_id %in% card_mus_genes_full) %>%
+  left_join(samples)
+salmon_tpm_cmwnt$timepoint <- factor(salmon_tpm_cmwnt$timepoint, levels = c("d2", "d4", 
+                                                                "d6", "d10",
+                                                                "d12"))
+salmon_tpm_cmwnt <- salmon_tpm_cmwnt %>% 
+  unite(gene_tp, gene_id, timepoint, remove = FALSE)
+tp_sig <- tp_sig %>% unite(gene_tp, gene_id, timepoint, remove = FALSE)
+
+salmon_tpm_cmwnt <- salmon_tpm_cmwnt %>% left_join(tp_sig %>% dplyr::select(gene_tp, deg))
+salmon_tpm_cmwnt$deg[!is.na(salmon_tpm_cmwnt$deg)] <- "sig"
+
+salmon_tpm_cmwnt_summary <- salmon_tpm_cmwnt %>% 
+  as.data.frame() %>%
+  group_by(gene_name, condition, timepoint, deg) %>%
+  summarize(mean_tpm = mean(tpm),
+            sd_tpm = sd(tpm))
+max_tpm_per_gene  <- salmon_tpm_cmwnt_summary %>%
+  group_by(gene_name) %>%
+  summarize(max_tpm = max(mean_tpm))
+salmon_tpm_cmwnt_summary <- salmon_tpm_cmwnt_summary %>%
+  left_join(max_tpm_per_gene)
+
+# d4_tp_sig <-d4_tp_sig %>% arrange(-log2FoldChange)
+cmwnt <- ggplot(salmon_tpm_cmwnt, aes(x = timepoint, y = tpm, color = condition, group = condition)) +
+  geom_hline(yintercept = 0) +
+  # geom_errorbar(aes(ymin = mean_tpm - sd_tpm, ymax = mean_tpm + sd_tpm)) +
+  geom_smooth(se = T, method = 'loess', formula = 'y ~ x', alpha = 0.1) + 
+  facet_wrap(~gene_name, scales = "free", drop = TRUE, ncol = 6) + 
+  scale_color_manual(values = c("#424242","#a8404c")) +
+  theme_paperwhite(grid = TRUE) +
+  geom_text(data = salmon_tpm_cmwnt_summary %>%
+              filter(deg == "sig", condition == "CTL"), aes(label = "*", y = max_tpm), stat = "identity",
+            size = 7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0.1, 2)) +
+  # ggtitle("Ion channel proteins") +
+   theme(legend.position = "none",
+         axis.title.x=element_blank())
+
+cmwnt_dkk1 <- ggplot(salmon_tpm_cmwnt %>% filter(gene_name == "DKK1"), aes(x = timepoint, y = tpm, color = condition, group = condition)) +
+  geom_hline(yintercept = 0.1) +
+  geom_vline(xintercept = "d2") +
+  # geom_errorbar(aes(ymin = mean_tpm - sd_tpm, ymax = mean_tpm + sd_tpm)) +
+  geom_smooth(se = T, method = 'loess', formula = 'y ~ x', alpha = 0.1) + 
+  facet_wrap(~gene_name, scales = "free", drop = TRUE, ncol = 6) + 
+  scale_color_manual(values = c("#424242","#a8404c")) +
+  theme_paperwhite(grid = TRUE) +
+  geom_text(data = salmon_tpm_cmwnt_summary %>%
+              filter(deg == "sig", condition == "CTL"), aes(label = "*", y = max_tpm), stat = "identity",
+            size = 7, show.legend = FALSE) +
+  # ggtitle("Ion channel proteins") +
+   theme(legend.position = "none",
+         axis.title.x=element_blank()) +
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)),
+              expand = c(0.05, 0.05)) 
+
+text <- ggparagraph(text = "\nWNT signalling pathway genes are affected by lncMYH7b KD. A. Heatmap of GSEA normalized enrichment scores for WNT related pathways across timepoints for genes ranked based on log2FC between KD and control cells at each timepoint. Significantly enrichment pathways are shown with an asterisk (padj < 0.05). B. Heatmap of Log2Fold-Changes between KD and controls for core enrichment genes from the pathway for canonical Wnt signaling pathway involved in cardiac muscle cell fate commitment (GO:0061317). C. One of these genes, DKK1 is significantly differentially expressed at day 4 and 12 (padj < 0.01, |log2FC| > 1). Log10 of the TPM is used for the y-axis. D. Expression profiles of all core enriched genes in this pathway. (Red - lncMYH7b KD; Black - control)", size = 11, color = "black", family = "sans")
+fig1 <- ggarrange(wnt_gse_heatmap[[4]], 
+                  ggarrange(cmwnt_lfc_heatmap[[4]], cmwnt_dkk1, plot.new(),
+                            nrow = 1,
+                            widths = c(0.7,0.6,0.2),
+                            labels = c("B", "C", "")),
+                  cmwnt,
+                  text,
+                  labels = c("A", "", "D", ""),
+                  ncol = 1, nrow = 4,
+                  heights = c(3,1,1,0.7)) +
+  theme(plot.margin = margin(1,1,1,1, "cm"))
+```
+
+```{r, echo = FALSE, message = FALSE, warning=FALSE, fig.height=12, fig.width=10, out.width='100%'}
+fig1
+ggsave("figures/gsea_wnt_pathways.pdf", height = 12, width = 10)
+```
+
+```{r enrichment-plots, include=FALSE}
+# # Some gene set enrichment stuff you can play with.
+# dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign)
+# ridgeplot(gse) + labs(x = "enrichment distribution")
+# gseaplot(gse, by = "all", title = gse$Description[1], geneSetID = 1)
+```
+
+```{r deg-timecourse, include=FALSE}
+# And here's how to do the timecourse analysis, if you want one list that is a global overview of which genes are changing...
+# # Run DESeq2 to get genes DE in time in the KD compared to control
+# dds <- DESeqDataSetFromMatrix(countData = salmon_counts,
+#                               colData = samples,
+#                               design = ~ timepoint + condition + timepoint*condition,
+#                               rowData = genes)
+# dds <- DESeq(dds, test = "LRT", reduced = ~ timepoint + condition)
+# 
+# # Retrieve the LRT results.
+# lrt_res <- results(dds, tidy = TRUE) %>%
+#   dplyr::rename(gene_id = row) %>%
+#   left_join(g2s) %>%
+#   dplyr::select(gene_id, gene_name, everything())
+# write_csv(lrt_res, "results/lrt_res.csv")
 ```
