@@ -6,6 +6,8 @@ date: "9/23/2021"
 output: html_document
 editor_options: 
   chunk_output_type: console
+  markdown: 
+    wrap: 72
 ---
 
 ```{r setup, include=FALSE}
@@ -71,6 +73,13 @@ stopifnot(all(rownames(samples) == colnames(salmon_counts)))
 # Change count matrix to integer mode
 mode(salmon_counts) <- "integer"
 ```
+
+### NOTE:
+
+Really need to get the proper annotation for MYH7b and plot it in the
+control cells and in the KD cells. Need to show that it's a proper
+knockdown and to interpret the data, we need to know what the profile in
+time of MYH7b should be during the differentiation process. -MS
 
 # lncMYH7b KD during cardiomyocyte differentiation
 
